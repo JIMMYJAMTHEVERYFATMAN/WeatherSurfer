@@ -431,3 +431,163 @@ async def fetch_overpass(lat, lon, radius_m=60000, want_min=15):
 	if len(unique) < want_min and radius_m < 200_000:
 		return await fetch_overpass(lat, lon, radius_m=radius_m * 2, want_min=want_min)
 
+	return unique[:max(want_min, 15)]
+
+
+class LocationWorker(QObject):
+	location_ready = pyqtSignal(float, float, float, list)
+	error = pyqtSignal(str)
+
+	def run(self):
+		try:
+			result = asyncio.run(self._get_location_and_spots())
+			lat, lon, acc, spots = result
+			self.location_ready.emit(lat, lon, acc, spots)
+		except Exception as e:
+			error_message(self.error, e)
+
+	async def _get_location_and_spots(self):
+		import winrt.windows.devices.geolocation as geo
+
+		status = await geo.Geolocator.request_access_async()
+		if str(status).lower().endswith("denied"):
+			raise Exception("Location denied by Windows settings.")
+		if str(status).lower().endswith("unspecified"):
+			raise Exception("Location is off / unavailable in Windows settings.")
+
+		locator = geo.Geolocator()
+		locator.desired_accuracy_in_meters = 25_000
+
+		pos = await asyncio.wait_for(locator.get_geoposition_async(), timeout=15)
+
+		coord = pos.coordinate
+		point = coord.point.position
+
+		lat = float(point.latitude)
+		lon = float(point.longitude)
+		acc = float(coord.accuracy) if coord.accuracy is not None else 25_000.0
+
+		spots = await fetch_overpass(lat, lon, radius_m=60000, want_min=15)
+
+		return lat, lon, acc, spots
+
+	async def _get_windows_location(self):
+		import winrt.windows.devices.geolocation as geo
+
+		# Ask Windows for permission status (desktop apps can still be denied)
+		status = await geo.Geolocator.request_access_async()
+		# status is an enum: Allowed / Denied / Unspecified
+		if str(status).lower().endswith("denied"):
+			raise Exception("Location access denied by Windows. Enable Location + Desktop app access in Settings.")
+		if str(status).lower().endswith("unspecified"):
+			raise Exception(
+				"Location access is unspecified (often means Location is OFF). Turn on Location services in Settings.")
+
+		locator = geo.Geolocator()
+		locator.desired_accuracy_in_meters = 25_000
+
+		pos = await asyncio.wait_for(locator.get_geoposition_async(), timeout=15)
+
+		coord = pos.coordinate
+		point = coord.point.position
+
+		lat = float(point.latitude)
+		lon = float(point.longitude)
+		acc = float(coord.accuracy) if coord.accuracy is not None else 25_000.0
+
+		return lat, lon, acc
+
+
+class MainWindow(QMainWindow):
+	def __init__(self):
+		super().__init__()
+		self.setWindowTitle("Minimal Location Map")
+		self.setMinimumSize(980, 620)
+
+		root = QWidget()
+		layout = QVBoxLayout(root)
+		layout.setContentsMargins(16, 16, 16, 16)
+		layout.setSpacing(10)
+
+		header = QLabel("Minimal Location Map")
+		header.setStyleSheet("""
+			QLabel {
+				font-size: 16px;
+				font-weight: 600;
+				color: rgba(255,255,255,0.92);
+			}
+		""")
+
+		self.sub = QLabel("Locating… (Windows may ask permission)")
+		self.sub.setStyleSheet("""
+			QLabel {
+				font-size: 12px;
+				color: rgba(255,255,255,0.65);
+			}
+		""")
+
+		sep = QFrame()
+		sep.setFrameShape(QFrame.Shape.HLine)
+		sep.setStyleSheet("color: rgba(255,255,255,0.08);")
+
+		self.web = QWebEngineView()
+		# Placeholder: somewhere neutral
+		self.web.setHtml(build_map_html(51.5074, -0.1278, accuracy_m=None))
+
+		root.setStyleSheet("QWidget { background: #0b0c10; }")
+
+		layout.addWidget(header)
+		layout.addWidget(self.sub)
+		layout.addWidget(sep)
+		layout.addWidget(self.web, 1)
+
+		self.setCentralWidget(root)
+
+		self._start_location()
+
+	def _start_location(self):
+		self.thread = QThread()
+		self.worker = LocationWorker()
+		self.worker.moveToThread(self.thread)
+
+		self.thread.started.connect(self.worker.run)
+		self.worker.location_ready.connect(self._on_location)
+		self.worker.error.connect(self._on_error)
+
+		# cleanup
+		self.worker.location_ready.connect(self.thread.quit)
+		self.worker.error.connect(self.thread.quit)
+		self.thread.finished.connect(self.worker.deleteLater)
+		self.thread.finished.connect(self.thread.deleteLater)
+
+		self.thread.start()
+
+	def _on_location(self, lat, lon, acc, spots):
+		self.sub.setText(f"Location:  {lat:.5f}, {lon:.5f}   •   accuracy ±{acc / 1000:.1f} km")
+
+		lines = [f"{i + 1}. {s['name']} — {s['dist_km']:.1f} km" for i, s in enumerate(spots)]
+		lines_text = "<br>".join(lines)
+
+		# Easiest: replace topbar title with “Nearby windsurf spots”
+		# and keep the map centered on you
+		html = build_map_html(lat, lon, accuracy_m=acc).replace("Your location", "Nearby windsurf spots")
+
+		# Inject a simple list under coords (fast hack)
+		html = html.replace('<div id="coords">—</div>',
+							f'<div id="coords">{lat:.5f}, {lon:.5f}<br><span style="font-size:11px;opacity:.7">{lines_text}</span></div>')
+
+		self.web.setHtml(html)
+
+	def _on_error(self, msg):
+		self.sub.setText(f"Couldn’t get location. {msg}")
+
+
+def main():
+	app = QApplication(sys.argv)
+	win = MainWindow()
+	win.show()
+	sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+	main()
