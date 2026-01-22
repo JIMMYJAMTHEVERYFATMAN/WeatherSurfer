@@ -408,6 +408,49 @@ async def fetch_overpass(lat, lon, radius_m=60000, want_min=15):
 		if tags.get("name"):
 			score += 10
 
+		tags_lower = {k: (v.lower() if isinstance(v, str) else v) for k, v in tags.items()}
+
+		name_l = name.lower()
+
+		# ❌ HARD EXCLUDES — these are almost never windsurfable
+		if any(x in name_l for x in [
+			"sailing club",
+			"sailing center",
+			"sailing centre",
+			"yacht club",
+			"marina",
+			"windsurfing club",
+			"windsurfing centre",
+			"windsurfing center",
+			"kitesurfing club",
+			"kitesurfing centre",
+			"kitesurfing center",
+			"surf club",
+			"surf centre",
+			"surf center",
+		]):
+			continue
+
+		if tags_lower.get("club") == "sailing":
+			continue
+
+		if tags_lower.get("leisure") == "marina":
+			continue
+
+		tags_lower = {k: (v.lower() if isinstance(v, str) else v) for k, v in tags.items()}
+
+		is_beach = (
+				tags_lower.get("natural") == "beach" or
+				tags_lower.get("landuse") == "beach" or
+				tags_lower.get("tourism") == "beach_resort" or
+				tags_lower.get("leisure") == "beach_resort"
+		)
+
+		if not is_beach:
+			continue
+
+		spot_type = "beach"
+
 		results.append({
 			"name": name,
 			"lat": float(plat),
